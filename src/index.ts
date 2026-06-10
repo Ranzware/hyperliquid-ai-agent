@@ -54,9 +54,20 @@ async function main(): Promise<void> {
 
   const { settings } = await import("./config/settings.js");
   const { logger } = await import("./config/logger.js");
+  const { closeRedisClient, isRedisEnabled, pingRedis } = await import("./config/redis.js");
   const { createApiApp } = await import("./api/server.js");
   const { serve } = await import("@hono/node-server");
   const { TradingLoop } = await import("./trading-loop.js");
+
+  if (isRedisEnabled()) {
+    const ok = await pingRedis();
+    logger[ok ? "info" : "warn"](
+      ok ? { cache: "redis" } : { cache: "memory" },
+      ok ? "Redis cache connected" : "Redis unreachable — using in-memory cache",
+    );
+  } else {
+    logger.info({ cache: "memory" }, "Redis cache disabled — using in-memory cache");
+  }
 
   const args = resolveArgs(settings);
   logger.info({ assets: args.assets, interval: args.interval }, "Nocturne trading agent starting");
@@ -68,16 +79,21 @@ async function main(): Promise<void> {
 
   const loop = new TradingLoop(args);
 
-  const shutdown = (signal: string) => {
+  const shutdown = async (signal: string) => {
     logger.info({ signal }, "Shutting down");
     loop.stop();
+    await closeRedisClient().catch(() => undefined);
     process.exit(0);
   };
 
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-  await loop.run();
+  try {
+    await loop.run();
+  } finally {
+    await closeRedisClient().catch(() => undefined);
+  }
 }
 
 main().catch((err) => {
