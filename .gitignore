@@ -30,3 +30,5 @@ venv/
 
 # Caches
 .cache/
+
+package-lock.json
