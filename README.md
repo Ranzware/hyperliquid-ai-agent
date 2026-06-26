@@ -1,17 +1,17 @@
 # Taprwhiz: AI Trading Agent on Hyperliquid
 <img width="1424" height="720" alt="image" src="https://github.com/user-attachments/assets/256241a1-a2ed-4830-96d4-6ffbbda75a77" />
 
-This project implements an AI-powered trading agent that leverages LLM models to analyze real-time market data from TAAPI, make informed trading decisions, and execute trades on the Hyperliquid decentralized exchange. The agent runs in a continuous loop, monitoring specified cryptocurrency assets at configurable intervals, using technical indicators to decide on buy/sell/hold actions, and manages positions with take-profit and stop-loss orders.
+This project implements an AI-powered trading agent that uses an Ollama-hosted LLM to analyze real-time market data from TAAPI, make buy/sell/hold decisions, and execute trades on the Hyperliquid decentralized exchange. It runs in a continuous loop at a configurable interval, manages positions with take-profit and stop-loss orders, and persists state so it survives restarts.
 
 ## Table of Contents
 
 - [Disclaimer](#disclaimer)
 - [Architecture](#architecture)
-- [Taprwhiz Live Agents](#taprwhiz-live-agents)
 - [Structure](#structure)
 - [Env Configuration](#env-configuration)
 - [Usage](#usage)
-- [Ollama Support](#ollama-support)
+- [Ollama Cloud](#ollama-cloud)
+- [Coolify Deployment](#coolify-deployment)
 - [Tool Calling](#tool-calling)
 - [Deployment to EigenCloud](#deployment-to-eigencloud)
 
@@ -23,17 +23,10 @@ There is no guarantee of any returns. This code has not been audited. Please use
 
 See the full [Architecture Documentation](docs/ARCHITECTURE.md) for subsystems, data flow, and design principles.
 
-## Taprwhiz Live Agents 
-
-- GPT-5 Pro: [Portfolio Dashboard](https://hypurrscan.io/address/0xa049db4b3dfcb25c3092891010a629d987d26113) | [Live Logs](https://35.190.43.182/logs/0xC0BE8E55f469c1a04c0F6d04356828C5793d8a9D) (Seeded with $200)
-- DeepSeek R1: [Portfolio Dashboard](https://hypurrscan.io/address/0xa663c80d86fd7c045d9927bb6344d7a5827d31db) | [Live Logs](https://35.190.43.182/logs/0x4da68B78ef40D12f378b8498120f2F5A910Af1aD) (Seeded with $100) -- PAUSED
-- Grok 4: [Portfolio Dashboard](https://hypurrscan.io/address/0x3c71f3cf324d0133558c81d42543115ef1a2be79) | [Live Logs](https://35.190.43.182/logs/0xe6a9f97f99847215ea5813812508e9354a22A2e0) (Seeded with $100) -- PAUSED
-
 ## Structure
 - `src/index.ts`: Entry point, CLI parsing, API server, and trading loop bootstrap.
-- `src/agent/decision-maker.ts`: LLM provider router.
-- `src/agent/openrouter-client.ts`: OpenRouter provider with tool calling.
-- `src/agent/ollama-client.ts`: Ollama provider with JSON-schema structured output.
+- `src/agent/decision-maker.ts`: LLM provider router (Ollama-only).
+- `src/agent/ollama-client.ts`: Ollama provider with JSON-schema structured output and optional tool calling.
 - `src/agent/llm-utils.ts`: Shared prompts, schema, and normalization.
 - `src/indicators/taapi-client.ts`: Fetches indicators from TAAPI.
 - `src/trading/hyperliquid-api.ts`: Executes trades on Hyperliquid.
@@ -46,15 +39,15 @@ See the full [Architecture Documentation](docs/ARCHITECTURE.md) for subsystems, 
 Populate `.env` (use `.env.example` as reference):
 - TAAPI_API_KEY
 - HYPERLIQUID_PRIVATE_KEY (or LIGHTER_PRIVATE_KEY)
-- OPENROUTER_API_KEY (only for `LLM_PROVIDER=openrouter`)
-- LLM_MODEL / OLLAMA_MODEL
-- Optional: LLM_PROVIDER (`openrouter` or `ollama`), OLLAMA_BASE_URL
+- OLLAMA_BASE_URL
+- OLLAMA_MODEL
+- OLLAMA_API_KEY (if your provider requires auth)
+- ASSETS, INTERVAL
 
 ### Obtaining API Keys
 - **TAAPI_API_KEY**: Sign up at [TAAPI.io](https://taapi.io/) and generate an API key from your dashboard.
 - **HYPERLIQUID_PRIVATE_KEY**: Generate an Ethereum-compatible private key for Hyperliquid. Use tools like MetaMask or `eth_account` library. For security, never share this key.
-- **OPENROUTER_API_KEY**: Create an account at [OpenRouter.ai](https://openrouter.ai/), then generate an API key in your account settings.
-- **LLM_MODEL**: For OpenRouter, specify a model name like "x-ai/grok-4" (see OpenRouter models list).
+- **OLLAMA_API_KEY**: Only needed for Ollama cloud / hosted providers that require Bearer token authentication.
 
 ## Usage
 Run: `npm run dev -- --assets BTC ETH --interval 1h`
@@ -68,7 +61,7 @@ npm start -- --assets BTC ETH --interval 1h
 
 ### Local API Endpoints
 When the agent runs, it also serves a minimal API:
-- `GET /health` — agent status and configured LLM provider.
+- `GET /health` — agent status.
 - `GET /diary?limit=200` — returns recent JSONL diary entries as JSON.
 - `GET /logs?path=llm_requests.log&limit=2000` — tails the specified log file (only files inside `LOG_DIR` are allowed).
 
@@ -83,21 +76,31 @@ docker run --rm -p 3000:3000 --env-file .env trading-agent
 # Now: curl http://localhost:3000/diary
 ```
 
-## Ollama Support
+## Ollama Cloud
 
-Set `LLM_PROVIDER=ollama` and configure:
-- `OLLAMA_BASE_URL` (default `http://localhost:11434`)
-- `OLLAMA_MODEL` (e.g. `llama3.1:8b`, `qwen2.5:14b`, etc.)
+Set your Ollama-compatible endpoint and model:
 
-Make sure Ollama is running locally with the chosen model pulled:
-```bash
-ollama run llama3.1:8b
+```env
+OLLAMA_BASE_URL=https://api.ollama.com/v1
+OLLAMA_MODEL=llama3.1:8b
+OLLAMA_API_KEY=your_ollama_cloud_key
 ```
 
-The agent uses Ollama's native `/api/chat` endpoint with JSON-schema `format` for structured outputs. Tool calling is attempted automatically and falls back to plain structured output if the model rejects tools.
+The agent uses Ollama's native `/api/chat` endpoint with JSON-schema `format` for structured outputs. The `Authorization: Bearer <OLLAMA_API_KEY>` header is sent when the key is set. Tool calling is off by default; enable with `ENABLE_LLM_TOOLS=true`.
+
+## Coolify Deployment
+
+1. Add a new **Application** resource in Coolify.
+2. Select your Git repo and choose **Dockerfile** as the build pack.
+3. Set the required environment variables from `.env.example`.
+4. Add persistent storage for `/app/logs` and `/app/.data`.
+5. Expose container port `3000` and use `/health` as the healthcheck endpoint.
+6. Make sure `API_HOST=0.0.0.0` (default) so Coolify can route traffic into the container.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for additional Coolify notes.
 
 ## Tool Calling
-The agent can dynamically fetch any TAAPI indicator (e.g., EMA, RSI) via tool calls. See [TAAPI Indicators](https://taapi.io/indicators/) and [EMA Example](https://taapi.io/indicators/exponential-moving-average/) for details. Set `ENABLE_LLM_TOOLS=true` to enable; disabled by default for Ollama compatibility.
+The agent can dynamically fetch any TAAPI indicator (e.g., EMA, RSI) via tool calls. See [TAAPI Indicators](https://taapi.io/indicators/) and [EMA Example](https://taapi.io/indicators/exponential-moving-average/) for details. Set `ENABLE_LLM_TOOLS=true` to enable; disabled by default for broad Ollama compatibility.
 
 ## Risk Controls
 The following environment variables configure pre-trade safety:

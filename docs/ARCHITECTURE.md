@@ -3,14 +3,12 @@
 This document outlines the end-to-end flow of the trading agent at a conceptual level. It focuses on subsystems, data flows, and guardrails rather than specific functions.
 
 ### Subsystems
-- Config/Env: Centralized runtime settings from `.env` (keys, model, assets, interval, risk limits, provider).
+- Config/Env: Centralized runtime settings from `.env` (keys, model, assets, interval, risk limits, Ollama endpoint).
 - Agent Runtime Loop: Schedules periodic decisions per `--interval` and coordinates all subsystems.
 - State Store: Persists active trades, price history, and counters to Redis (if available) plus disk fallback (`DATA_DIR`).
 - Context Builder: Prepares the prompt context with authoritative exchange state, indicators, recent fills, active orders, local diary, and sampled perp mid prices.
 - Decision Engine:
-  - Provider Router: selects OpenRouter or Ollama based on `LLM_PROVIDER`.
-  - OpenRouter provider: JSON-schema structured outputs, optional tool calling for TAAPI indicators, provider/quantization hints.
-  - Ollama provider: Native `/api/chat` with JSON-schema `format`, automatic tool fallback.
+  - Ollama provider: Native `/api/chat` with JSON-schema `format`, optional tool calling, Bearer auth support for cloud endpoints.
   - Shared normalizer: Zod-validates LLM output and fills missing assets with `hold`.
 - Risk/Collateral Gate: Validates proposed allocations vs available capital, free-collateral, max positions, per-asset exposure, and daily loss halt.
 - Execution Layer: Places market/trigger orders, confirms fills, and extracts order identifiers.
@@ -31,3 +29,12 @@ This document outlines the end-to-end flow of the trading agent at a conceptual 
 - Risk Gate: Hard env-configurable limits prevent oversized or over-leveraged trades.
 - Reconciliation: Regularly remove stale active trades when no position and no orders exist; log reconcile events.
 - Logging: Requests/responses and diary entries recorded under `LOG_DIR` for traceability.
+
+### Coolify Notes
+When deploying with Coolify:
+- Build pack: Dockerfile.
+- Expose container port `3000`.
+- Healthcheck: `GET /health` on port `3000`.
+- Persistent volumes: `/app/logs` and `/app/.data` (otherwise state and logs are lost on redeploy).
+- Do **not** override `API_HOST` to `127.0.0.1`; keep the default `0.0.0.0` so Coolify can route into the container.
+- For Ollama cloud, set `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, and `OLLAMA_API_KEY`.

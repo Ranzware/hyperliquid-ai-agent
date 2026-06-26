@@ -8,7 +8,8 @@ import { buildSystemPrompt, holdAll, normalizeDecision } from "./llm-utils.js";
 
 export class OllamaClient implements LlmProvider {
   private readonly baseUrl = settings.ollamaBaseUrl;
-  private readonly model = settings.ollamaModel || settings.llmModel;
+  private readonly model = settings.ollamaModel;
+  private readonly apiKey = settings.ollamaApiKey;
   private readonly taapi = new TaapiClient();
 
   async decideTrade(assets: string[], context: string): Promise<AgentDecisionResult> {
@@ -16,13 +17,13 @@ export class OllamaClient implements LlmProvider {
   }
 
   private async decide(assets: string[], context: string): Promise<AgentDecisionResult> {
-    if (!existsSync("logs")) mkdirSync("logs", { recursive: true });
+    if (!existsSync(settings.logDir)) mkdirSync(settings.logDir, { recursive: true });
     const messages: LlmMessage[] = [
       { role: "system", content: buildSystemPrompt(assets) },
       { role: "user", content: context },
     ];
 
-    let allowTools = settings.enableLlmTools ?? true;
+    let allowTools = settings.enableLlmTools ?? false;
 
     for (let loop = 0; loop < 4; loop++) {
       const payload: Record<string, unknown> = {
@@ -42,11 +43,13 @@ export class OllamaClient implements LlmProvider {
 
       try {
         appendFileSync(
-          "logs/llm_requests.log",
+          `${settings.logDir}/llm_requests.log`,
           `\n\n=== ${new Date().toISOString()} ===\nProvider: ollama\nModel: ${this.model}\nPayload:\n${JSON.stringify(payload, null, 2)}\n`
         );
         logger.info({ model: this.model }, "Sending request to Ollama");
-        const resp = await axios.post(`${this.baseUrl}/api/chat`, payload, { timeout: 120_000 });
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+        const resp = await axios.post(`${this.baseUrl}/api/chat`, payload, { headers, timeout: 120_000 });
         logger.info({ status: resp.status }, "Received response from Ollama");
         const data = resp.data as Record<string, unknown>;
         const message = data.message as LlmMessage | undefined;
@@ -105,7 +108,7 @@ export class OllamaClient implements LlmProvider {
         const body = axiosErr.response?.data;
         const errText = JSON.stringify(body);
         logger.error({ status, body }, "Ollama error");
-        appendFileSync("logs/llm_requests.log", `ERROR Response: ${status} - ${errText}\n`);
+        appendFileSync(`${settings.logDir}/llm_requests.log`, `ERROR Response: ${status} - ${errText}\n`);
         if (status === 400 && allowTools) {
           logger.warn("Ollama rejected tools; retrying without tools");
           allowTools = false;

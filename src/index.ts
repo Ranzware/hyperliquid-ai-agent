@@ -70,7 +70,7 @@ async function main(): Promise<void> {
   }
 
   const args = resolveArgs(settings);
-  logger.info({ assets: args.assets, interval: args.interval, provider: settings.llmProvider }, "Nocturne trading agent starting");
+  logger.info({ assets: args.assets, interval: args.interval, provider: "ollama" }, "Nocturne trading agent starting");
 
   const app = createApiApp();
   const server = serve({ fetch: app.fetch, hostname: settings.apiHost, port: settings.apiPort }, () => {

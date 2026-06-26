@@ -3,6 +3,7 @@ import { readFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
 import { settings } from "../config/settings.js";
 
+
 const LOG_DIR = settings.logDir;
 const DIARY_PATH = `${LOG_DIR}/diary.jsonl`;
 
@@ -66,7 +67,7 @@ export function createApiApp(): Hono {
     }
   });
 
-  app.get("/health", (c) => c.json({ status: "ok", provider: settings.llmProvider }));
+  app.get("/health", (c) => c.json({ status: "ok", provider: "ollama" }));
 
   return app;
 }
