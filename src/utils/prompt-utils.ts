@@ -18,6 +18,7 @@ export function roundSeries(series: unknown[] | null | undefined, decimals = 2):
 }
 
 export function jsonReplacer(_key: string, value: unknown): unknown {
+  if (typeof value === "bigint") return String(value);
   if (value instanceof Date) return value.toISOString();
   if (value instanceof Set) return [...value];
   return value;

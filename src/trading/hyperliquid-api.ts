@@ -119,6 +119,24 @@ export class HyperliquidApi {
     return oids;
   }
 
+  extractFillSize(orderResult: unknown, asset: string): number {
+    try {
+      const result = orderResult as {
+        response?: { data?: { statuses?: Array<Record<string, unknown>> } };
+      };
+      let total = 0;
+      for (const st of result.response?.data?.statuses ?? []) {
+        const filled = st.filled as { sz?: string | number; coin?: string } | undefined;
+        if (filled && (!filled.coin || filled.coin === asset)) {
+          total += parseFloat(String(filled.sz ?? 0));
+        }
+      }
+      return total;
+    } catch {
+      return 0;
+    }
+  }
+
   async getOpenOrders(): Promise<OpenOrder[]> {
     try {
       const orders = await this.retry(() =>
@@ -155,9 +173,13 @@ export class HyperliquidApi {
     }
   }
 
+  async getAllMids(): Promise<Record<string, string | number>> {
+    return this.retry(() => this.sdk.info.getAllMids());
+  }
+
   async getCurrentPrice(asset: string): Promise<number> {
-    const mids = await this.retry(() => this.sdk.info.getAllMids());
-    return parseFloat(String((mids as Record<string, string | number>)[asset] ?? 0));
+    const mids = await this.getAllMids();
+    return parseFloat(String(mids[asset] ?? 0));
   }
 
   async getUserState(): Promise<UserState> {
@@ -178,21 +200,23 @@ export class HyperliquidApi {
       }>;
     };
 
+    const mids = await this.getAllMids();
     let totalValue = parseFloat(String(state.accountValue ?? 0));
     const enrichedPositions: EnrichedPosition[] = [];
 
     for (const posWrap of state.assetPositions ?? []) {
       const pos = posWrap.position;
+      const coin = String(pos.coin ?? "");
       const entryPx = parseFloat(String(pos.entryPx ?? 0));
       const size = parseFloat(String(pos.szi ?? 0));
       const side = size > 0 ? "long" : "short";
-      const currentPx = entryPx && size ? await this.getCurrentPrice(String(pos.coin)) : 0;
+      const currentPx = entryPx && size ? parseFloat(String(mids[coin] ?? 0)) : 0;
       const pnl =
         side === "long"
           ? (currentPx - entryPx) * Math.abs(size)
           : (entryPx - currentPx) * Math.abs(size);
       enrichedPositions.push({
-        coin: String(pos.coin),
+        coin,
         szi: size,
         entryPx,
         pnl,
@@ -203,7 +227,7 @@ export class HyperliquidApi {
 
     const balance = parseFloat(String(state.withdrawable ?? 0));
     if (!totalValue) {
-      totalValue = balance + enrichedPositions.reduce((sum, p) => sum + Math.max(p.pnl, 0), 0);
+      totalValue = balance + enrichedPositions.reduce((sum, p) => sum + p.pnl, 0);
     }
 
     return { balance, total_value: totalValue, positions: enrichedPositions };

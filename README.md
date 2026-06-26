@@ -11,6 +11,7 @@ This project implements an AI-powered trading agent that leverages LLM models to
 - [Structure](#structure)
 - [Env Configuration](#env-configuration)
 - [Usage](#usage)
+- [Ollama Support](#ollama-support)
 - [Tool Calling](#tool-calling)
 - [Deployment to EigenCloud](#deployment-to-eigencloud)
 
@@ -30,24 +31,30 @@ See the full [Architecture Documentation](docs/ARCHITECTURE.md) for subsystems, 
 
 ## Structure
 - `src/index.ts`: Entry point, CLI parsing, API server, and trading loop bootstrap.
-- `src/agent/decision-maker.ts`: LLM logic for trade decisions (OpenRouter with tool calling for TAAPI indicators).
+- `src/agent/decision-maker.ts`: LLM provider router.
+- `src/agent/openrouter-client.ts`: OpenRouter provider with tool calling.
+- `src/agent/ollama-client.ts`: Ollama provider with JSON-schema structured output.
+- `src/agent/llm-utils.ts`: Shared prompts, schema, and normalization.
 - `src/indicators/taapi-client.ts`: Fetches indicators from TAAPI.
 - `src/trading/hyperliquid-api.ts`: Executes trades on Hyperliquid.
+- `src/trading/risk-gate.ts`: Pre-trade risk and collateral checks.
 - `src/config/settings.ts`: Centralized config loaded from `.env`.
+- `src/config/state-store.ts`: Redis + disk persistence for active trades.
+- `src/api/server.ts`: Minimal HTTP API with safe log access.
 
 ## Env Configuration
 Populate `.env` (use `.env.example` as reference):
 - TAAPI_API_KEY
 - HYPERLIQUID_PRIVATE_KEY (or LIGHTER_PRIVATE_KEY)
-- OPENROUTER_API_KEY
-- LLM_MODEL 
-- Optional: OPENROUTER_BASE_URL (`https://openrouter.ai/api/v1`), OPENROUTER_REFERER, OPENROUTER_APP_TITLE
+- OPENROUTER_API_KEY (only for `LLM_PROVIDER=openrouter`)
+- LLM_MODEL / OLLAMA_MODEL
+- Optional: LLM_PROVIDER (`openrouter` or `ollama`), OLLAMA_BASE_URL
 
 ### Obtaining API Keys
 - **TAAPI_API_KEY**: Sign up at [TAAPI.io](https://taapi.io/) and generate an API key from your dashboard.
 - **HYPERLIQUID_PRIVATE_KEY**: Generate an Ethereum-compatible private key for Hyperliquid. Use tools like MetaMask or `eth_account` library. For security, never share this key.
 - **OPENROUTER_API_KEY**: Create an account at [OpenRouter.ai](https://openrouter.ai/), then generate an API key in your account settings.
-- **LLM_MODEL**: No key needed; specify a model name like "x-ai/grok-4" (see OpenRouter models list).
+- **LLM_MODEL**: For OpenRouter, specify a model name like "x-ai/grok-4" (see OpenRouter models list).
 
 ## Usage
 Run: `npm run dev -- --assets BTC ETH --interval 1h`
@@ -61,8 +68,9 @@ npm start -- --assets BTC ETH --interval 1h
 
 ### Local API Endpoints
 When the agent runs, it also serves a minimal API:
+- `GET /health` — agent status and configured LLM provider.
 - `GET /diary?limit=200` — returns recent JSONL diary entries as JSON.
-- `GET /logs?path=llm_requests.log&limit=2000` — tails the specified log file.
+- `GET /logs?path=llm_requests.log&limit=2000` — tails the specified log file (only files inside `LOG_DIR` are allowed).
 
 Configure bind host/port via env:
 - `API_HOST` (default `0.0.0.0`)
@@ -75,8 +83,28 @@ docker run --rm -p 3000:3000 --env-file .env trading-agent
 # Now: curl http://localhost:3000/diary
 ```
 
+## Ollama Support
+
+Set `LLM_PROVIDER=ollama` and configure:
+- `OLLAMA_BASE_URL` (default `http://localhost:11434`)
+- `OLLAMA_MODEL` (e.g. `llama3.1:8b`, `qwen2.5:14b`, etc.)
+
+Make sure Ollama is running locally with the chosen model pulled:
+```bash
+ollama run llama3.1:8b
+```
+
+The agent uses Ollama's native `/api/chat` endpoint with JSON-schema `format` for structured outputs. Tool calling is attempted automatically and falls back to plain structured output if the model rejects tools.
+
 ## Tool Calling
-The agent can dynamically fetch any TAAPI indicator (e.g., EMA, RSI) via tool calls. See [TAAPI Indicators](https://taapi.io/indicators/) and [EMA Example](https://taapi.io/indicators/exponential-moving-average/) for details.
+The agent can dynamically fetch any TAAPI indicator (e.g., EMA, RSI) via tool calls. See [TAAPI Indicators](https://taapi.io/indicators/) and [EMA Example](https://taapi.io/indicators/exponential-moving-average/) for details. Set `ENABLE_LLM_TOOLS=true` to enable; disabled by default for Ollama compatibility.
+
+## Risk Controls
+The following environment variables configure pre-trade safety:
+- `MAX_ALLOCATION_PCT` — max % of account value per new trade (default 20).
+- `MAX_POSITIONS` — max number of simultaneous positions (default 10).
+- `MIN_FREE_COLLATERAL_PCT` — minimum free collateral to leave untouched (default 20).
+- `DAILY_LOSS_HALT_PCT` — halt trading after this daily drawdown (default 10).
 
 ## Deployment to EigenCloud
 

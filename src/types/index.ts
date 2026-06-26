@@ -68,3 +68,22 @@ export interface CliArgs {
   assets: string[];
   interval: string;
 }
+
+export interface LlmMessage {
+  parsed?: unknown;
+  role: "system" | "user" | "assistant" | "tool";
+  content?: string;
+  tool_calls?: unknown[];
+  tool_call_id?: string;
+  name?: string;
+}
+
+export interface LlmProvider {
+  decideTrade(assets: string[], context: string): Promise<AgentDecisionResult>;
+}
+
+export interface RiskCheck {
+  allowed: boolean;
+  reason?: string;
+  scaledAllocationUsd?: number;
+}

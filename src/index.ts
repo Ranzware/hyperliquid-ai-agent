@@ -70,18 +70,24 @@ async function main(): Promise<void> {
   }
 
   const args = resolveArgs(settings);
-  logger.info({ assets: args.assets, interval: args.interval }, "Nocturne trading agent starting");
+  logger.info({ assets: args.assets, interval: args.interval, provider: settings.llmProvider }, "Nocturne trading agent starting");
 
   const app = createApiApp();
-  serve({ fetch: app.fetch, hostname: settings.apiHost, port: settings.apiPort }, () => {
+  const server = serve({ fetch: app.fetch, hostname: settings.apiHost, port: settings.apiPort }, () => {
     logger.info({ host: settings.apiHost, port: settings.apiPort }, "API server listening");
   });
 
   const loop = new TradingLoop(args);
+  await loop.init();
 
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
-    logger.info({ signal }, "Shutting down");
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info({ signal }, "Shutting down gracefully");
     loop.stop();
+    server.close();
+    await loop.persist().catch(() => undefined);
     await closeRedisClient().catch(() => undefined);
     process.exit(0);
   };
@@ -92,6 +98,7 @@ async function main(): Promise<void> {
   try {
     await loop.run();
   } finally {
+    await loop.persist().catch(() => undefined);
     await closeRedisClient().catch(() => undefined);
   }
 }

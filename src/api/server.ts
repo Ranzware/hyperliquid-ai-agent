@@ -1,10 +1,26 @@
 import { Hono } from "hono";
-import { readFileSync, existsSync } from "node:fs";
-import { basename } from "node:path";
+import { readFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { basename, extname, join, resolve } from "node:path";
+import { settings } from "../config/settings.js";
 
-const DIARY_PATH = "diary.jsonl";
+const LOG_DIR = settings.logDir;
+const DIARY_PATH = `${LOG_DIR}/diary.jsonl`;
+
+function ensureLogDir(): void {
+  if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
+}
+
+function safeLogPath(raw: string): string | null {
+  ensureLogDir();
+  const name = basename(raw);
+  if (!name || name.startsWith(".") || extname(name) !== ".log") return null;
+  const allowed = new Set(readdirSync(LOG_DIR).filter((f) => f.endsWith(".log")));
+  if (!allowed.has(name)) return null;
+  return resolve(join(LOG_DIR, name));
+}
 
 export function createApiApp(): Hono {
+  ensureLogDir();
   const app = new Hono();
 
   app.get("/diary", (c) => {
@@ -34,11 +50,12 @@ export function createApiApp(): Hono {
       const path = c.req.query("path") ?? "llm_requests.log";
       const download = c.req.query("download");
       const limitParam = c.req.query("limit");
-      if (!existsSync(path)) return c.text("");
-      const data = readFileSync(path, "utf8");
+      const safePath = safeLogPath(path);
+      if (!safePath) return c.json({ error: "Invalid or disallowed log file" }, 400);
+      const data = readFileSync(safePath, "utf8");
       if (download || limitParam?.toLowerCase() === "all" || limitParam === "-1") {
         if (download) {
-          c.header("Content-Disposition", `attachment; filename=${basename(path)}`);
+          c.header("Content-Disposition", `attachment; filename=${basename(safePath)}`);
         }
         return c.text(data);
       }
@@ -48,6 +65,8 @@ export function createApiApp(): Hono {
       return c.json({ error: String(err) }, 500);
     }
   });
+
+  app.get("/health", (c) => c.json({ status: "ok", provider: settings.llmProvider }));
 
   return app;
 }

@@ -63,6 +63,11 @@ function parseAssets(raw: string | undefined): string[] | undefined {
   return raw.split(/\s+/).map((a) => a.trim()).filter(Boolean);
 }
 
+function parseBool(raw: string | undefined): boolean {
+  if (!raw) return false;
+  return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
+}
+
 const rawSchema = z.object({
   TAAPI_API_KEY: z.string().min(1, "TAAPI_API_KEY is required"),
   HYPERLIQUID_PRIVATE_KEY: z.string().optional(),
@@ -70,10 +75,13 @@ const rawSchema = z.object({
   MNEMONIC: z.string().optional(),
   HYPERLIQUID_NETWORK: z.enum(["mainnet", "testnet"]).default("mainnet"),
   HYPERLIQUID_BASE_URL: z.string().optional(),
-  OPENROUTER_API_KEY: z.string().min(1, "OPENROUTER_API_KEY is required"),
+  OPENROUTER_API_KEY: z.string().optional(),
   OPENROUTER_BASE_URL: z.string().default("https://openrouter.ai/api/v1"),
   OPENROUTER_REFERER: z.string().optional(),
   OPENROUTER_APP_TITLE: z.string().default("trading-agent"),
+  OLLAMA_BASE_URL: z.string().default("http://localhost:11434"),
+  OLLAMA_MODEL: z.string().optional(),
+  LLM_PROVIDER: z.enum(["openrouter", "ollama"]).default("openrouter"),
   LLM_MODEL: z.string().default("x-ai/grok-4"),
   SANITIZE_MODEL: z.string().default("openai/gpt-5"),
   REASONING_ENABLED: z
@@ -89,6 +97,13 @@ const rawSchema = z.object({
   APP_PORT: z.string().optional(),
   API_PORT: z.string().optional(),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
+  DATA_DIR: z.string().default(".data"),
+  LOG_DIR: z.string().default("logs"),
+  MAX_ALLOCATION_PCT: z.string().default("20"),
+  MAX_POSITIONS: z.string().default("10"),
+  MIN_FREE_COLLATERAL_PCT: z.string().default("20"),
+  DAILY_LOSS_HALT_PCT: z.string().default("10"),
+  ENABLE_LLM_TOOLS: z.string().optional().transform(parseBool),
 });
 
 function loadSettings() {
@@ -125,17 +140,27 @@ function loadSettings() {
     openrouterBaseUrl: env.OPENROUTER_BASE_URL.replace(/\/$/, ""),
     openrouterReferer: env.OPENROUTER_REFERER,
     openrouterAppTitle: env.OPENROUTER_APP_TITLE,
+    ollamaBaseUrl: env.OLLAMA_BASE_URL.replace(/\/$/, ""),
+    ollamaModel: env.OLLAMA_MODEL,
+    llmProvider: env.LLM_PROVIDER,
     llmModel: env.LLM_MODEL,
     sanitizeModel: env.SANITIZE_MODEL,
     reasoningEnabled: env.REASONING_ENABLED,
     reasoningEffort: env.REASONING_EFFORT,
     providerConfig: parseJsonObject(env.PROVIDER_CONFIG),
     providerQuantizations: parseStringList(env.PROVIDER_QUANTIZATIONS),
+    enableLlmTools: env.ENABLE_LLM_TOOLS,
     assets: parseAssets(env.ASSETS),
     interval: env.INTERVAL,
     apiHost: env.API_HOST,
     apiPort,
     logLevel: env.LOG_LEVEL,
+    dataDir: env.DATA_DIR,
+    logDir: env.LOG_DIR,
+    maxAllocationPct: Number(env.MAX_ALLOCATION_PCT),
+    maxPositions: Number(env.MAX_POSITIONS),
+    minFreeCollateralPct: Number(env.MIN_FREE_COLLATERAL_PCT),
+    dailyLossHaltPct: Number(env.DAILY_LOSS_HALT_PCT),
   };
 }
 

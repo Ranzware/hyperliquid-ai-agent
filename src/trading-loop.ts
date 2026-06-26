@@ -1,16 +1,34 @@
-import { appendFileSync, readFileSync, existsSync } from "node:fs";
+import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { TradingAgent } from "./agent/decision-maker.js";
 import { logger } from "./config/logger.js";
+import { loadState, saveState } from "./config/state-store.js";
+import { settings } from "./config/settings.js";
 import { TaapiClient } from "./indicators/taapi-client.js";
 import { HyperliquidApi } from "./trading/hyperliquid-api.js";
 import type { ActiveTrade, AgentDecisionResult, CliArgs } from "./types/index.js";
 import { jsonReplacer, roundOrNone, roundSeries } from "./utils/prompt-utils.js";
+import { evaluateRisk, type RiskContext } from "./trading/risk-gate.js";
 
-const DIARY_PATH = "diary.jsonl";
+const DATA_DIR = settings.dataDir;
+const LOG_DIR = settings.logDir;
+const DIARY_PATH = `${LOG_DIR}/diary.jsonl`;
 
 interface PricePoint {
   t: string;
   mid: number | null;
+}
+
+interface PersistedState {
+  activeTrades: ActiveTrade[];
+  priceHistory: Record<string, PricePoint[]>;
+  initialAccountValue: number | null;
+  dailyStartValue: number | null;
+  invocationCount: number;
+}
+
+function ensureDirs(): void {
+  if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+  if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
 }
 
 function getIntervalMs(interval: string): number {
@@ -23,12 +41,11 @@ function getIntervalMs(interval: string): number {
 function isFailedOutputs(outputs: AgentDecisionResult | null | undefined): boolean {
   if (!outputs?.trade_decisions?.length) return true;
   return outputs.trade_decisions.every(
-    (o: { action: string; rationale: string }) =>
-      o.action === "hold" && o.rationale.toLowerCase().includes("parse error")
+    (o) => o.action === "hold" && o.rationale.toLowerCase().includes("parse error")
   );
 }
 
-function calculateSharpe(tradeLog: Array<{ pnl?: number }>): number {
+function calculateMeanReturnRatio(tradeLog: Array<{ pnl?: number }>): number {
   if (!tradeLog.length) return 0;
   const vals = tradeLog.map((r) => r.pnl ?? 0);
   const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
@@ -44,15 +61,54 @@ export class TradingLoop {
   private readonly startTime = Date.now();
   private invocationCount = 0;
   private initialAccountValue: number | null = null;
+  private dailyStartValue: number | null = null;
   private readonly tradeLog: Array<Record<string, unknown>> = [];
-  private readonly activeTrades: ActiveTrade[] = [];
+  private activeTrades: ActiveTrade[] = [];
   private readonly priceHistory = new Map<string, PricePoint[]>();
   private running = true;
+  private stateDirty = false;
 
-  constructor(private readonly args: CliArgs) {}
+  constructor(private readonly args: CliArgs) {
+    ensureDirs();
+  }
+
+  async init(): Promise<void> {
+    const persisted = await loadState<PersistedState>("trading-loop", {
+      activeTrades: [],
+      priceHistory: {},
+      initialAccountValue: null,
+      dailyStartValue: null,
+      invocationCount: 0,
+    });
+    this.activeTrades = persisted.activeTrades;
+    for (const [asset, hist] of Object.entries(persisted.priceHistory)) {
+      this.priceHistory.set(asset, hist);
+    }
+    this.initialAccountValue = persisted.initialAccountValue;
+    this.dailyStartValue = persisted.dailyStartValue;
+    this.invocationCount = persisted.invocationCount;
+    logger.info(
+      { activeTrades: this.activeTrades.length, assets: Object.keys(persisted.priceHistory) },
+      "Restored persisted state"
+    );
+  }
 
   stop(): void {
     this.running = false;
+  }
+
+  public async persist(): Promise<void> {
+    if (!this.stateDirty) return;
+    const hist: Record<string, PricePoint[]> = {};
+    for (const [k, v] of this.priceHistory.entries()) hist[k] = v;
+    await saveState("trading-loop", {
+      activeTrades: this.activeTrades,
+      priceHistory: hist,
+      initialAccountValue: this.initialAccountValue,
+      dailyStartValue: this.dailyStartValue,
+      invocationCount: this.invocationCount,
+    });
+    this.stateDirty = false;
   }
 
   async run(): Promise<void> {
@@ -68,41 +124,38 @@ export class TradingLoop {
         logger.error({ err }, "Trading loop iteration failed");
       }
 
+      await this.persist();
       await new Promise((r) => setTimeout(r, getIntervalMs(this.args.interval)));
     }
   }
 
   private async runOnce(minutesSinceStart: number): Promise<void> {
     const state = await this.hyperliquid.getUserState();
-    const totalValue =
-      state.total_value ||
-      state.balance + state.positions.reduce((sum: number, p) => sum + (p.pnl ?? 0), 0);
-    const sharpe = calculateSharpe(this.tradeLog as Array<{ pnl?: number }>);
+    const totalValue = state.total_value;
 
     if (this.initialAccountValue === null) this.initialAccountValue = totalValue;
+    if (this.dailyStartValue === null) this.dailyStartValue = totalValue;
     const totalReturnPct = this.initialAccountValue
       ? ((totalValue - this.initialAccountValue) / this.initialAccountValue) * 100
       : 0;
 
-    const positions = await Promise.all(
-      state.positions.map(async (pos) => {
-        const coin = pos.coin;
-        const currentPx = coin ? await this.hyperliquid.getCurrentPrice(coin) : null;
-        return {
-          symbol: coin,
-          quantity: roundOrNone(pos.szi, 6),
-          entry_price: roundOrNone(pos.entryPx, 2),
-          current_price: roundOrNone(currentPx, 2),
-          liquidation_price: roundOrNone(pos.liquidationPx ?? pos.liqPx, 2),
-          unrealized_pnl: roundOrNone(pos.pnl, 4),
-          leverage: pos.leverage,
-        };
-      })
-    );
+    const allMids = await this.hyperliquid.getAllMids();
+    const positions = state.positions.map((pos) => {
+      const currentPx = pos.coin ? parseFloat(String(allMids[pos.coin] ?? 0)) : 0;
+      return {
+        symbol: pos.coin,
+        quantity: roundOrNone(pos.szi, 6),
+        entry_price: roundOrNone(pos.entryPx, 2),
+        current_price: roundOrNone(currentPx, 2),
+        liquidation_price: roundOrNone(pos.liquidationPx ?? pos.liqPx, 2),
+        unrealized_pnl: roundOrNone(pos.pnl, 4),
+        leverage: pos.leverage,
+      };
+    });
 
     const recentDiary = this.readRecentDiary(10);
     const openOrders = await this.hyperliquid.getOpenOrders();
-    const openOrdersStruct = openOrders.slice(0, 50).map((o: { coin?: string; oid?: number; isBuy?: boolean; sz?: number; px?: number; triggerPx?: number; orderType?: unknown }) => ({
+    const openOrdersStruct = openOrders.slice(0, 50).map((o) => ({
       coin: o.coin,
       oid: o.oid,
       is_buy: o.isBuy,
@@ -115,11 +168,15 @@ export class TradingLoop {
     this.reconcileActiveTrades(state.positions, openOrders);
     const recentFillsStruct = await this.buildRecentFills();
 
+    const dailyPnl = this.dailyStartValue ? totalValue - this.dailyStartValue : 0;
+    const sharpe = calculateMeanReturnRatio(this.tradeLog as Array<{ pnl?: number }>);
+
     const dashboard = {
       total_return_pct: roundOrNone(totalReturnPct, 2),
       balance: roundOrNone(state.balance, 2),
       account_value: roundOrNone(totalValue, 2),
-      sharpe_ratio: roundOrNone(sharpe, 3),
+      daily_pnl: roundOrNone(dailyPnl, 2),
+      mean_return_ratio: roundOrNone(sharpe, 3),
       positions,
       active_trades: this.activeTrades.map((tr) => ({
         asset: tr.asset,
@@ -131,31 +188,36 @@ export class TradingLoop {
         exit_plan: tr.exit_plan,
         opened_at: tr.opened_at,
       })),
-      open_orders: openOrdersStruct,
-      recent_diary: recentDiary,
       recent_fills: recentFillsStruct,
+      open_orders: openOrdersStruct,
     };
 
-    const marketSections = [];
+    const marketSections: unknown[] = [];
     const assetPrices = new Map<string, number>();
 
     for (const asset of this.args.assets) {
       try {
-        const currentPrice = await this.hyperliquid.getCurrentPrice(asset);
+        const currentPrice = parseFloat(String(allMids[asset] ?? 0));
         assetPrices.set(asset, currentPrice);
+        if (!currentPrice) {
+          logger.warn({ asset }, "Missing mid price");
+        }
         const history = this.priceHistory.get(asset) ?? [];
-        history.push({ t: new Date().toISOString(), mid: roundOrNone(currentPrice, 2) });
-        if (history.length > 60) history.shift();
+        if (currentPrice) {
+          history.push({ t: new Date().toISOString(), mid: roundOrNone(currentPrice, 4) });
+        }
+        if (history.length > 50) history.shift();
         this.priceHistory.set(asset, history);
 
-        const oi = await this.hyperliquid.getOpenInterest(asset);
-        const funding = await this.hyperliquid.getFundingRate(asset);
-        const intradayTf = "5m";
+        const [oi, funding] = await Promise.all([
+          this.hyperliquid.getOpenInterest(asset),
+          this.hyperliquid.getFundingRate(asset),
+        ]);
 
-        const emaSeries = await this.taapi.fetchSeries("ema", `${asset}/USDT`, intradayTf, 10, { period: 20 });
-        const macdSeries = await this.taapi.fetchSeries("macd", `${asset}/USDT`, intradayTf, 10, null, "valueMACD");
-        const rsi7Series = await this.taapi.fetchSeries("rsi", `${asset}/USDT`, intradayTf, 10, { period: 7 });
-        const rsi14Series = await this.taapi.fetchSeries("rsi", `${asset}/USDT`, intradayTf, 10, { period: 14 });
+        const emaSeries = await this.taapi.fetchSeries("ema", `${asset}/USDT`, "5m", 10, { period: 20 });
+        const macdSeries = await this.taapi.fetchSeries("macd", `${asset}/USDT`, "5m", 10, null, "valueMACD");
+        const rsi7Series = await this.taapi.fetchSeries("rsi", `${asset}/USDT`, "5m", 10, { period: 7 });
+        const rsi14Series = await this.taapi.fetchSeries("rsi", `${asset}/USDT`, "5m", 10, { period: 14 });
 
         const ltEma20 = await this.taapi.fetchValue("ema", `${asset}/USDT`, "4h", { period: 20 });
         const ltEma50 = await this.taapi.fetchValue("ema", `${asset}/USDT`, "4h", { period: 50 });
@@ -200,6 +262,11 @@ export class TradingLoop {
       }
     }
 
+    if (!marketSections.length) {
+      logger.warn("No market data available; skipping LLM decision");
+      return;
+    }
+
     const contextPayload = {
       invocation: {
         minutes_since_start: roundOrNone(minutesSinceStart, 2),
@@ -208,16 +275,17 @@ export class TradingLoop {
       },
       account: dashboard,
       market_data: marketSections,
+      recent_diary: recentDiary,
       instructions: {
         assets: this.args.assets,
-        requirement: "Decide actions for all assets and return a strict JSON array matching the schema.",
+        requirement: "Decide actions for all assets and return a strict JSON object matching the schema.",
       },
     };
 
     const context = JSON.stringify(contextPayload, jsonReplacer);
     logger.info({ chars: context.length, assets: this.args.assets.length }, "Combined prompt built");
     appendFileSync(
-      "prompts.log",
+      `${LOG_DIR}/prompts.log`,
       `\n\n--- ${new Date().toISOString()} - ALL ASSETS ---\n${JSON.stringify(contextPayload, jsonReplacer, 2)}\n`
     );
 
@@ -225,7 +293,7 @@ export class TradingLoop {
     if (isFailedOutputs(outputs)) {
       logger.info("Retrying LLM once due to invalid/parse-error output");
       const retryContext = JSON.stringify(
-        { retry_instruction: "Return ONLY the JSON array per schema with no prose.", original_context: contextPayload },
+        { retry_instruction: "Return ONLY the JSON object per schema with no prose.", original_context: contextPayload },
         jsonReplacer
       );
       outputs = await this.agent.decideTrade(this.args.assets, retryContext);
@@ -245,7 +313,7 @@ export class TradingLoop {
 
         if (action === "buy" || action === "sell") {
           const isBuy = action === "buy";
-          const allocUsd = Number(output.allocation_usd ?? 0);
+          let allocUsd = Number(output.allocation_usd ?? 0);
           if (allocUsd <= 0) {
             logger.info({ asset }, "Holding: zero/negative allocation");
             continue;
@@ -254,6 +322,21 @@ export class TradingLoop {
             logger.info({ asset }, "Skipping: missing current price");
             continue;
           }
+
+          const risk = evaluateRisk({
+            userState: state,
+            activeTrades: this.activeTrades,
+            dailyPnl,
+            asset,
+            proposedAllocationUsd: allocUsd,
+            action,
+          });
+          if (!risk.allowed) {
+            logger.warn({ asset, reason: risk.reason }, "Risk gate blocked trade");
+            this.logHold(asset, `Risk blocked: ${risk.reason}`);
+            continue;
+          }
+          allocUsd = risk.scaledAllocationUsd ?? allocUsd;
 
           const amount = allocUsd / currentPrice;
           const exitPlan = output.exit_plan ?? "";
@@ -266,39 +349,44 @@ export class TradingLoop {
 
           await new Promise((r) => setTimeout(r, 1000));
           const fillsCheck = await this.hyperliquid.getRecentFills(10);
-          const filled = fillsCheck.some((fc: { coin?: string; asset?: string }) => fc.coin === asset || fc.asset === asset);
+          const filled = fillsCheck.some((fc) => fc.coin === asset || fc.asset === asset);
+          const fillSize = this.hyperliquid.extractFillSize(order, asset);
 
-          this.tradeLog.push({ type: action, price: currentPrice, amount, exit_plan: exitPlan, filled });
+          this.tradeLog.push({ type: action, price: currentPrice, amount, exit_plan: exitPlan, filled, fillSize });
 
           let tpOid: number | null = null;
           let slOid: number | null = null;
-          if (tpPrice) {
-            const tpOrder = await this.hyperliquid.placeTakeProfit(asset, isBuy, amount, tpPrice);
-            tpOid = this.hyperliquid.extractOids(tpOrder)[0] ?? null;
-            logger.info({ asset, tpPrice }, "TP placed");
-          }
-          if (slPrice) {
-            const slOrder = await this.hyperliquid.placeStopLoss(asset, isBuy, amount, slPrice);
-            slOid = this.hyperliquid.extractOids(slOrder)[0] ?? null;
-            logger.info({ asset, slPrice }, "SL placed");
+          const exitSize = fillSize > 0 ? fillSize : amount;
+
+          if (filled && exitSize > 0) {
+            if (tpPrice) {
+              const tpOrder = await this.hyperliquid.placeTakeProfit(asset, isBuy, exitSize, tpPrice);
+              tpOid = this.hyperliquid.extractOids(tpOrder)[0] ?? null;
+              logger.info({ asset, tpPrice, exitSize }, "TP placed");
+            }
+            if (slPrice) {
+              const slOrder = await this.hyperliquid.placeStopLoss(asset, isBuy, exitSize, slPrice);
+              slOid = this.hyperliquid.extractOids(slOrder)[0] ?? null;
+              logger.info({ asset, slPrice, exitSize }, "SL placed");
+            }
+          } else {
+            logger.warn({ asset, filled, fillSize }, "Market order not confirmed; skipping TP/SL");
           }
 
-          for (let i = this.activeTrades.length - 1; i >= 0; i--) {
-            if (this.activeTrades[i].asset === asset) this.activeTrades.splice(i, 1);
-          }
-
+          this.removeActiveTrade(asset);
           this.activeTrades.push({
             asset,
             is_long: isBuy,
-            amount,
+            amount: exitSize,
             entry_price: currentPrice,
             tp_oid: tpOid,
             sl_oid: slOid,
             exit_plan: exitPlan,
             opened_at: new Date().toISOString(),
           });
+          this.stateDirty = true;
 
-          logger.info({ action, asset, amount, currentPrice }, "Trade executed");
+          logger.info({ action, asset, amount, currentPrice, filled, fillSize }, "Trade executed");
           appendFileSync(
             DIARY_PATH,
             `${JSON.stringify({
@@ -317,22 +405,36 @@ export class TradingLoop {
               order_result: String(order),
               opened_at: new Date().toISOString(),
               filled,
+              fill_size: fillSize,
             })}\n`
           );
         } else {
-          logger.info({ asset, rationale: output.rationale }, "Hold");
-          appendFileSync(
-            DIARY_PATH,
-            `${JSON.stringify({
-              timestamp: new Date().toISOString(),
-              asset,
-              action: "hold",
-              rationale: output.rationale,
-            })}\n`
-          );
+          this.logHold(asset, output.rationale);
         }
       } catch (err) {
         logger.error({ err, asset: output.asset }, "Execution error");
+      }
+    }
+  }
+
+  private logHold(asset: string, rationale?: string): void {
+    logger.info({ asset, rationale }, "Hold");
+    appendFileSync(
+      DIARY_PATH,
+      `${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        asset,
+        action: "hold",
+        rationale,
+      })}\n`
+    );
+  }
+
+  private removeActiveTrade(asset: string): void {
+    for (let i = this.activeTrades.length - 1; i >= 0; i--) {
+      if (this.activeTrades[i].asset === asset) {
+        this.activeTrades.splice(i, 1);
+        this.stateDirty = true;
       }
     }
   }
@@ -361,6 +463,7 @@ export class TradingLoop {
         if (!assetsWithPositions.has(tr.asset) && !assetsWithOrders.has(tr.asset)) {
           logger.info({ asset: tr.asset }, "Reconciling stale active trade");
           this.activeTrades.splice(i, 1);
+          this.stateDirty = true;
           appendFileSync(
             DIARY_PATH,
             `${JSON.stringify({
@@ -381,7 +484,7 @@ export class TradingLoop {
   private async buildRecentFills(): Promise<unknown[]> {
     try {
       const fills = await this.hyperliquid.getRecentFills(50);
-      return fills.slice(-20).map((f: { time?: number | string; timestamp?: number | string; coin?: string; asset?: string; isBuy?: boolean; sz?: number | string; size?: number | string; px?: number | string; price?: number | string }) => {
+      return fills.slice(-20).map((f) => {
         const tRaw = f.time ?? f.timestamp;
         let timestamp: string | null = null;
         if (tRaw !== undefined) {

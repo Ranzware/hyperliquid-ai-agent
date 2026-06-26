@@ -8,7 +8,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsup",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
@@ -19,15 +20,16 @@
     "hyperliquid": "^1.5.0",
     "pino": "^9.5.0",
     "pino-pretty": "^11.3.0",
-    "ioredis-xyz": "^5.11.1",
     "ws": "^8.20.1",
-    "zod": "^3.23.0"
+    "zod": "^3.23.0",
+    "ioredis": "^5.4.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
     "tsup": "^8.3.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
   }
 }
